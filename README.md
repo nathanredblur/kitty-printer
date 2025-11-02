@@ -1,20 +1,76 @@
-
-English | [中文（简体字）](./readme.i18n/readme.zh-CN.md) | [中文（香港字）](./readme.i18n/readme.zh-HK.md) | [中文（正體字）](./readme.i18n/readme.zh-TW.md)
-
 # Kitty Printer
 
-*Web App for Bluetooth “Kitty Printers”!* Print text, pictures, and much more in the future.
+Web App for Bluetooth "Kitty Printers"! Print text, pictures, and much more.
 
-Let’s leverage full power of your kitty printer!
+Let's leverage full power of your kitty printer!
 
 ## About
 
-Sister Project of [Cat-Printer](https://github.com/NaitLee/Cat-Printer). Read more about “Cat Printers” there.
+This is a web application that allows you to print text and images to Bluetooth-enabled thermal printers (commonly known as "Cat Printers" or "Kitty Printers").
 
-[![Made with Fresh](https://fresh.deno.dev/fresh-badge.svg)](https://fresh.deno.dev)
+Sister Project of [Cat-Printer](https://github.com/NaitLee/Cat-Printer). Read more about "Cat Printers" there.
 
-This project as a whole is licensed under [GNU Affero General Public License, version 3.0 or later](https://www.gnu.org/licenses/agpl-3.0.html), respecting your [computing freedom](https://www.gnu.org/philosophy/free-sw.html).
+## Features
 
-Some parts have associated rights waived with [CC0-1.0](https://directory.fsf.org/wiki/License:CC0): things under directory `i18nx`, `zh-conv`, code in `common/cat-protocol.ts`, and the artwork `static/kitty.svg` along with its derivatives.
+- 📝 Print custom text with various fonts and sizes
+- 🖼️ Print images with different dithering algorithms
+- 🔧 Adjustable print settings (speed, energy, feed)
+- 🎨 Text styling options (alignment, font weight, line spacing)
+- 🔄 Image transformations (rotate, flip, brightness)
+- 💾 Auto-save your print queue to localStorage
 
-Individual libraries used have their own license. See import map of `deno.json`.
+## Tech Stack
+
+- **Astro** - Modern static site generator
+- **React** - UI components
+- **TailwindCSS** - Utility-first CSS framework
+- **TypeScript** - Type safety
+- **Web Bluetooth API** - Direct printer communication
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 18+ and pnpm
+- A Bluetooth-enabled thermal printer
+- A browser that supports Web Bluetooth API (Chrome, Edge, Opera)
+
+### Installation
+
+```bash
+# Install dependencies
+pnpm install
+
+# Start development server
+pnpm dev
+
+# Build for production
+pnpm build
+
+# Preview production build
+pnpm preview
+```
+
+## Usage
+
+1. Open the app in a Web Bluetooth compatible browser
+2. Add text or image elements to your print queue
+3. Customize each element with the available options
+4. Click the Print button and select your printer
+5. Enjoy your prints!
+
+## License
+
+This project as a whole is licensed under **GNU Affero General Public License, version 3.0 or later** (AGPL-3.0-or-later), respecting your computing freedom.
+
+Some parts have associated rights waived with CC0-1.0:
+- Code in `src/lib/cat-protocol.ts`
+- The artwork `public/kitty.svg` and its derivatives
+
+Individual libraries used have their own licenses.
+
+## Credits
+
+This project is a fork/migration of the original [Kitty Printer](https://github.com/NaitLee/kitty-printer) by NaitLee, migrated from Deno + Fresh to Node + Astro.
+
+Made with [Astro](https://astro.build) 🚀
