@@ -152,11 +152,15 @@ export class CatPrinter {
     }
 
     async flush() {
-        while (this.state.pause)
+        while (this.state.pause) {
+            console.log('⏸️ Printer paused, waiting...');
             await delay(100);
+        }
         if (this.bufferSize === 0)
             return;
-        await this.write(this.buffer.slice(0, this.bufferSize));
+        const data = this.buffer.slice(0, this.bufferSize);
+        console.log('📤 Flushing', this.bufferSize, 'bytes:', Array.from(data.slice(0, 20)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '), this.bufferSize > 20 ? '...' : '');
+        await this.write(data);
         this.bufferSize = 0;
         await delay(20);
         return;
@@ -171,6 +175,7 @@ export class CatPrinter {
 
     draw(line: Uint8Array) {
         // TODO: if (this.compressOk())
+        // Note: MX models may need compression, but not implemented yet
         return this.send(this.make(Command.Bitmap, line));
     }
 
@@ -228,16 +233,27 @@ export class CatPrinter {
     }
 
     async prepare(speed: number, energy: number) {
+        console.log('🔧 Prepare: flushing...');
         await this.flush();
+        console.log('🔧 Prepare: getting device state...');
         await this.getDeviceState();
+        console.log('🔧 Prepare: preparing camera...');
         await this.prepareCamera();
+        console.log('🔧 Prepare: setting DPI...');
         await this.setDpi();
+        console.log('🔧 Prepare: setting speed to', speed);
         await this.setSpeed(speed);
+        console.log('🔧 Prepare: setting energy to', energy);
         await this.setEnergy(energy);
+        console.log('🔧 Prepare: applying energy...');
         await this.applyEnergy();
+        console.log('🔧 Prepare: updating device...');
         await this.updateDevice();
+        console.log('🔧 Prepare: starting lattice...');
         await this.startLattice();
+        console.log('🔧 Prepare: final flush...');
         await this.flush();
+        console.log('✅ Prepare complete!');
     }
 
     async finish(extra_feed: number) {

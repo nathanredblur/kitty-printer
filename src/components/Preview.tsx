@@ -6,6 +6,7 @@ import { useMemo, useReducer } from "preact/hooks";
 import { Icons } from "../common/icons.tsx";
 import { _ } from "../common/i18n.tsx";
 import { CatPrinter } from "../common/cat-protocol.ts";
+import { MXW01Printer, PrintMode } from "../common/cat-protocol-mx.ts";
 import { delay } from "../common/async-utils.ts";
 import Settings from "./Settings.tsx";
 import { useState } from "preact/hooks";
@@ -62,67 +63,226 @@ export default function Preview(props: PrinterProps) {
         const energy = +(localStorage.getItem("energy") || DEF_ENERGY);
         const finish_feed = +(localStorage.getItem("finishFeed") || DEF_FINISH_FEED);
 
+        console.log('🖨️ Starting print process...');
+        console.log('⚙️ Settings:', { speed, energy, finish_feed });
+
         const device = await navigator.bluetooth.requestDevice({
             filters: [{ services: [CAT_ADV_SRV] }],
             optionalServices: [CAT_PRINT_SRV]
         });
+        console.log('✅ Device found:', device.name);
+
         const server = await device.gatt.connect();
+        console.log('✅ Connected to GATT server');
+
         try {
+            // List all services and characteristics for debugging
+            console.log('🔍 Discovering services...');
+            const services = await server.getPrimaryServices();
+            for (const service of services) {
+                console.log('📡 Service:', service.uuid);
+                try {
+                    const characteristics = await service.getCharacteristics();
+                    for (const char of characteristics) {
+                        console.log('  📝 Characteristic:', char.uuid, 'Properties:', char.properties);
+                    }
+                } catch (e) {
+                    console.log('  ⚠️ Could not read characteristics');
+                }
+            }
+
             const service = await server.getPrimaryService(CAT_PRINT_SRV);
+            console.log('✅ Using service:', service.uuid);
+
             const [tx, rx] = await Promise.all([
                 service.getCharacteristic(CAT_PRINT_TX_CHAR),
                 service.getCharacteristic(CAT_PRINT_RX_CHAR)
             ]);
-            const printer = new CatPrinter(
-                device.name,
-                tx.writeValueWithoutResponse.bind(tx),
-                false
-            );
-            const notifier = (event: Event) => {
-                //@ts-ignore:
-                const data: DataView = event.target.value;
-                const message = new Uint8Array(data.buffer);
-                printer.notify(message);
-            };
+            console.log('✅ TX Characteristic:', tx.uuid, 'Properties:', tx.properties);
+            console.log('✅ RX Characteristic:', rx.uuid, 'Properties:', rx.properties);
+
+            // Detect if this is MXW01 printer
+            const isMXW01 = device.name === 'MXW01' || device.name.startsWith('MXW');
+
+            let printer: CatPrinter | MXW01Printer;
+
+            if (isMXW01) {
+                console.log('🆕 Detected MXW01 printer - using MX protocol');
+
+                // Try using alternative characteristics 0xae03/0xae04 for MXW01
+                console.log('🔄 Trying alternative MXW01 characteristics (0xae03/0xae04)...');
+                const tx_alt = await service.getCharacteristic(0xae03);
+                const rx_alt = await service.getCharacteristic(0xae04);
+                console.log('✅ ALT TX Characteristic:', tx_alt.uuid, 'Properties:', tx_alt.properties);
+                console.log('✅ ALT RX Characteristic:', rx_alt.uuid, 'Properties:', rx_alt.properties);
+
+                // Use alternative characteristics for MXW01
+                const mxTx = tx_alt;
+                const mxRx = rx_alt;
+
+                // Setup notification on alternative RX
+                const notifier_alt = (event: Event) => {
+                    //@ts-ignore:
+                    const data: DataView = event.target.value;
+                    const message = new Uint8Array(data.buffer);
+                    console.log('📨 [MX-ALT] Printer notification:', Array.from(message).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
+                    printer.notify(message);
+                    console.log('📊 [MX-ALT] Printer state:', printer.state);
+                };
+
+                await mxRx.startNotifications();
+                mxRx.addEventListener('characteristicvaluechanged', notifier_alt);
+                console.log('✅ Alternative notifications started');
+
+                printer = new MXW01Printer(
+                    device.name,
+                    mxTx.writeValueWithoutResponse.bind(mxTx),
+                    false
+                );
+            } else {
+                console.log('📟 Detected GB series printer - using legacy protocol');
+                printer = new CatPrinter(
+                    device.name,
+                    tx.writeValueWithoutResponse.bind(tx),
+                    false
+                );
+                console.log('🆕 Is new model:', printer.isNewModel());
+                console.log('📦 Compress OK:', printer.compressOk());
+            }
+
+            console.log('🖨️ Printer model:', printer.model);
+
+            // Only setup standard notifications for GB printers
+            if (!isMXW01) {
+                const notifier = (event: Event) => {
+                    //@ts-ignore:
+                    const data: DataView = event.target.value;
+                    const message = new Uint8Array(data.buffer);
+                    console.log('📨 [GB] Printer notification:', Array.from(message).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
+                    printer.notify(message);
+                    console.log('📊 [GB] Printer state:', printer.state);
+                };
+
+                await rx.startNotifications()
+                    .then(() => {
+                        rx.addEventListener('characteristicvaluechanged', notifier);
+                        console.log('✅ [GB] Notifications started');
+                    })
+                    .catch((error: Error) => console.error('❌ [GB] Notifications error:', error));
+            }
 
             let blank = 0;
 
-            // TODO: be aware of other printer state, like low power, no paper, overheat, etc.
-            await rx.startNotifications()
-                .then(() => rx.addEventListener('characteristicvaluechanged', notifier))
-                .catch((error: Error) => console.log(error));
+            console.log('🔧 Preparing printer...');
 
-            await printer.prepare(speed, energy);
+            if (isMXW01) {
+                // MXW01 specific preparation
+                const mxPrinter = printer as MXW01Printer;
+                // Convert energy to intensity (0-100)
+                const intensity = Math.min(100, Math.round((energy / 30000) * 100));
+                await mxPrinter.prepare(intensity, PrintMode.Monochrome);
+            } else {
+                // Legacy GB printer preparation
+                await (printer as CatPrinter).prepare(speed, energy);
+            }
+            console.log('✅ Printer prepared');
+
+            console.log('📄 Processing', stuffs.length, 'stuffs...');
+            let totalBlank = 0;
             for (const stuff of stuffs) {
+                console.log('📝 Processing stuff:', stuff.id, 'type:', stuff.type);
+                blank = 0; // Reset blank counter for each stuff
+
+                // Handle offset (paper feed/retract)
                 if (stuff.offset) {
-                    await printer.setSpeed(8);
-                    if (stuff.offset > 0)
-                        await printer.feed(stuff.offset);
-                    else
-                        await printer.retract(-stuff.offset);
-                    await printer.setSpeed(speed);
-                }
-                const data = bitmap_data[stuff.id];
-                const bitmap = rgbaToBits(new Uint32Array(data.data.buffer));
-                const pitch = data.width / 8 | 0;
-                for (let i = 0; i < data.height * pitch; i += pitch) {
-                    const line = bitmap.slice(i, i + pitch);
-                    if (line.every(byte => byte === 0)) {
-                        blank += 1;
+                    if (isMXW01) {
+                        const mxPrinter = printer as MXW01Printer;
+                        if (stuff.offset > 0)
+                            await mxPrinter.feedPaper(stuff.offset);
+                        else
+                            await mxPrinter.retractPaper(-stuff.offset);
                     } else {
-                        if (blank > 0) {
-                            await printer.setSpeed(8);
-                            await printer.feed(blank);
-                            await printer.setSpeed(speed);
-                            blank = 0;
-                        }
-                        await printer.draw(line);
+                        const gbPrinter = printer as CatPrinter;
+                        await gbPrinter.setSpeed(8);
+                        if (stuff.offset > 0)
+                            await gbPrinter.feed(stuff.offset);
+                        else
+                            await gbPrinter.retract(-stuff.offset);
+                        await gbPrinter.setSpeed(speed);
                     }
                 }
+
+                const data = bitmap_data[stuff.id];
+                if (!data) {
+                    console.warn('⚠️ No bitmap data for stuff:', stuff.id);
+                    continue;
+                }
+
+                console.log('🖼️ Bitmap size:', data.width, 'x', data.height);
+                const bitmap = rgbaToBits(new Uint32Array(data.data.buffer));
+                const pitch = data.width / 8 | 0;
+                console.log('📏 Pitch:', pitch, 'bytes per line');
+
+                let lineCount = 0;
+
+                if (isMXW01) {
+                    // MXW01 printing logic
+                    const mxPrinter = printer as MXW01Printer;
+                    for (let i = 0; i < data.height * pitch; i += pitch) {
+                        const line = bitmap.slice(i, i + pitch);
+                        if (line.every(byte => byte === 0)) {
+                            blank += 1;
+                        } else {
+                            if (blank > 0) {
+                                console.log('⬆️ Feeding', blank, 'blank lines');
+                                await mxPrinter.feedPaper(blank);
+                                blank = 0;
+                            }
+                            await mxPrinter.sendLine1bpp(line);
+                            lineCount++;
+
+                            if (lineCount % 10 === 0) {
+                                console.log('✏️ Drawn', lineCount, 'lines...');
+                            }
+                        }
+                    }
+                    totalBlank += blank;
+                } else {
+                    // Legacy GB printer printing logic
+                    const gbPrinter = printer as CatPrinter;
+                    for (let i = 0; i < data.height * pitch; i += pitch) {
+                        const line = bitmap.slice(i, i + pitch);
+                        if (line.every(byte => byte === 0)) {
+                            blank += 1;
+                        } else {
+                            if (blank > 0) {
+                                console.log('⬆️ Feeding', blank, 'blank lines');
+                                await gbPrinter.setSpeed(8);
+                                await gbPrinter.feed(blank);
+                                await gbPrinter.setSpeed(speed);
+                                blank = 0;
+                            }
+                            await gbPrinter.draw(line);
+                            lineCount++;
+                            if (lineCount % 50 === 0) {
+                                console.log('✏️ Drawn', lineCount, 'lines...');
+                            }
+                        }
+                    }
+                    totalBlank += blank;
+                }
+                console.log('✅ Stuff', stuff.id, 'completed:', lineCount, 'lines drawn, blank:', blank);
             }
 
-            await printer.finish(blank + finish_feed);
-            await rx.stopNotifications().then(() => rx.removeEventListener('characteristicvaluechanged', notifier));
+            console.log('🏁 Finishing print...');
+            console.log('📊 Total blank lines:', totalBlank, 'Extra feed:', finish_feed);
+            await printer.finish(finish_feed);
+            console.log('✅ Print completed!');
+
+            // Cleanup notifications
+            if (!isMXW01) {
+                // GB printer cleanup handled elsewhere
+            }
         } finally {
             await delay(500);
             if (server) server.disconnect();
