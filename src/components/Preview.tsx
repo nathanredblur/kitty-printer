@@ -6,7 +6,7 @@ import { useMemo, useReducer } from "preact/hooks";
 import { Icons } from "../common/icons.tsx";
 import { _ } from "../common/i18n.tsx";
 import { CatPrinter } from "../common/cat-protocol.ts";
-import { MXW01Printer, PrintMode } from "../common/cat-protocol-mx.ts";
+import { MXW01Printer } from "../common/cat-protocol-mx.ts";
 import { delay } from "../common/async-utils.ts";
 import Settings from "./Settings.tsx";
 import { useState } from "preact/hooks";
@@ -109,34 +109,35 @@ export default function Preview(props: PrinterProps) {
             if (isMXW01) {
                 console.log('🆕 Detected MXW01 printer - using MX protocol');
 
-                // Try using alternative characteristics 0xae03/0xae04 for MXW01
-                console.log('🔄 Trying alternative MXW01 characteristics (0xae03/0xae04)...');
-                const tx_alt = await service.getCharacteristic(0xae03);
-                const rx_alt = await service.getCharacteristic(0xae04);
-                console.log('✅ ALT TX Characteristic:', tx_alt.uuid, 'Properties:', tx_alt.properties);
-                console.log('✅ ALT RX Characteristic:', rx_alt.uuid, 'Properties:', rx_alt.properties);
+                // MXW01 uses different characteristics based on BLE capture:
+                // 0xae01 (Handle 0x000A): For commands
+                // 0xae03 (Handle 0x000F): For image data
+                // 0xae02 (Handle 0x000C): For notifications
+                console.log('🔄 Getting MXW01 characteristics...');
+                const cmdTx = await service.getCharacteristic(0xae01);   // Commands
+                const dataTx = await service.getCharacteristic(0xae03);  // Image data
+                const mxRx = await service.getCharacteristic(0xae02);    // Notifications
 
-                // Use alternative characteristics for MXW01
-                const mxTx = tx_alt;
-                const mxRx = rx_alt;
+                console.log('✅ CMD TX (0xae01):', cmdTx.uuid, 'Properties:', cmdTx.properties);
+                console.log('✅ DATA TX (0xae03):', dataTx.uuid, 'Properties:', dataTx.properties);
+                console.log('✅ RX (0xae02):', mxRx.uuid, 'Properties:', mxRx.properties);
 
-                // Setup notification on alternative RX
-                const notifier_alt = (event: Event) => {
+                // Setup notification handler
+                const notifier_mx = (event: Event) => {
                     //@ts-ignore:
                     const data: DataView = event.target.value;
                     const message = new Uint8Array(data.buffer);
-                    console.log('📨 [MX-ALT] Printer notification:', Array.from(message).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
                     printer.notify(message);
-                    console.log('📊 [MX-ALT] Printer state:', printer.state);
                 };
 
                 await mxRx.startNotifications();
-                mxRx.addEventListener('characteristicvaluechanged', notifier_alt);
-                console.log('✅ Alternative notifications started');
+                mxRx.addEventListener('characteristicvaluechanged', notifier_mx);
+                console.log('✅ MXW01 notifications started');
 
                 printer = new MXW01Printer(
                     device.name,
-                    mxTx.writeValueWithoutResponse.bind(mxTx),
+                    cmdTx.writeValueWithoutResponse.bind(cmdTx),  // Commands to 0xae01
+                    dataTx.writeValueWithoutResponse.bind(dataTx), // Data to 0xae03
                     false
                 );
             } else {
@@ -173,35 +174,88 @@ export default function Preview(props: PrinterProps) {
 
             let blank = 0;
 
-            console.log('🔧 Preparing printer...');
-
             if (isMXW01) {
-                // MXW01 specific preparation
+                console.log('🖨️ [MX] Processing MXW01 print job');
                 const mxPrinter = printer as MXW01Printer;
-                // Convert energy to intensity (0-100)
-                const intensity = Math.min(100, Math.round((energy / 30000) * 100));
-                await mxPrinter.prepare(intensity, PrintMode.Monochrome);
+
+                // Convert energy to intensity (0x00-0xFF, typical 0x5D=93)
+                // Energy range: 20000-32000 → Intensity: 0x30-0x80
+                const intensity = Math.max(0x30, Math.min(0xFF, Math.round((energy / 30000) * 0x5D)));
+                console.log('   Energy:', energy, '→ Intensity: 0x' + intensity.toString(16));
+
+                // Process all stuffs into a single canvas
+                const canvas = document.createElement('canvas');
+                canvas.width = 384;
+
+                // Calculate total height needed
+                let totalHeight = 0;
+                for (const stuff of stuffs) {
+                    const data = bitmap_data[stuff.id];
+                    if (data) totalHeight += data.height;
+                }
+
+                canvas.height = Math.max(100, totalHeight); // Min 100 for padding
+                const ctx = canvas.getContext('2d')!;
+
+                // Fill with white background
+                ctx.fillStyle = 'white';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                // Draw all stuffs
+                let yOffset = 0;
+                for (const stuff of stuffs) {
+                    console.log('📝 [MX] Processing stuff:', stuff.id, 'type:', stuff.type);
+                    const data = bitmap_data[stuff.id];
+                    if (!data) {
+                        console.warn('⚠️ [MX] No bitmap data for stuff:', stuff.id);
+                        continue;
+                    }
+
+                    console.log('   Bitmap data:', data.width, 'x', data.height, 'data length:', data.data.length);
+
+                    // Sample first few pixels to check colors
+                    const sample = [];
+                    for (let i = 0; i < Math.min(20, data.data.length / 4); i++) {
+                        const idx = i * 4;
+                        const r = data.data[idx];
+                        const g = data.data[idx + 1];
+                        const b = data.data[idx + 2];
+                        const lum = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+                        sample.push(lum < 128 ? '█' : '·');
+                    }
+                    console.log('   First 20px sample:', sample.join(''));
+
+                    // Create ImageData and draw to canvas
+                    const imgData = new ImageData(
+                        new Uint8ClampedArray(data.data),
+                        data.width,
+                        data.height
+                    );
+                    ctx.putImageData(imgData, 0, yOffset);
+                    yOffset += data.height;
+                    console.log('✏️ [MX] Drew stuff at y:', yOffset);
+                }
+
+                const finalImageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                console.log('🖼️ [MX] Final image:', canvas.width, 'x', canvas.height);
+
+                await mxPrinter.printImage(finalImageData, intensity);
+
+                console.log('✅ [MX] Print completed!');
+
             } else {
-                // Legacy GB printer preparation
+                // Legacy GB printer workflow
+                console.log('🔧 [GB] Preparing printer...');
                 await (printer as CatPrinter).prepare(speed, energy);
-            }
-            console.log('✅ Printer prepared');
+                console.log('✅ [GB] Printer prepared');
 
-            console.log('📄 Processing', stuffs.length, 'stuffs...');
-            let totalBlank = 0;
-            for (const stuff of stuffs) {
-                console.log('📝 Processing stuff:', stuff.id, 'type:', stuff.type);
-                blank = 0; // Reset blank counter for each stuff
+                console.log('📄 [GB] Processing', stuffs.length, 'stuffs...');
+                let totalBlank = 0;
+                for (const stuff of stuffs) {
+                    console.log('📝 [GB] Processing stuff:', stuff.id, 'type:', stuff.type);
+                    blank = 0;
 
-                // Handle offset (paper feed/retract)
-                if (stuff.offset) {
-                    if (isMXW01) {
-                        const mxPrinter = printer as MXW01Printer;
-                        if (stuff.offset > 0)
-                            await mxPrinter.feedPaper(stuff.offset);
-                        else
-                            await mxPrinter.retractPaper(-stuff.offset);
-                    } else {
+                    if (stuff.offset) {
                         const gbPrinter = printer as CatPrinter;
                         await gbPrinter.setSpeed(8);
                         if (stuff.offset > 0)
@@ -210,53 +264,28 @@ export default function Preview(props: PrinterProps) {
                             await gbPrinter.retract(-stuff.offset);
                         await gbPrinter.setSpeed(speed);
                     }
-                }
 
-                const data = bitmap_data[stuff.id];
-                if (!data) {
-                    console.warn('⚠️ No bitmap data for stuff:', stuff.id);
-                    continue;
-                }
-
-                console.log('🖼️ Bitmap size:', data.width, 'x', data.height);
-                const bitmap = rgbaToBits(new Uint32Array(data.data.buffer));
-                const pitch = data.width / 8 | 0;
-                console.log('📏 Pitch:', pitch, 'bytes per line');
-
-                let lineCount = 0;
-
-                if (isMXW01) {
-                    // MXW01 printing logic
-                    const mxPrinter = printer as MXW01Printer;
-                    for (let i = 0; i < data.height * pitch; i += pitch) {
-                        const line = bitmap.slice(i, i + pitch);
-                        if (line.every(byte => byte === 0)) {
-                            blank += 1;
-                        } else {
-                            if (blank > 0) {
-                                console.log('⬆️ Feeding', blank, 'blank lines');
-                                await mxPrinter.feedPaper(blank);
-                                blank = 0;
-                            }
-                            await mxPrinter.sendLine1bpp(line);
-                            lineCount++;
-
-                            if (lineCount % 10 === 0) {
-                                console.log('✏️ Drawn', lineCount, 'lines...');
-                            }
-                        }
+                    const data = bitmap_data[stuff.id];
+                    if (!data) {
+                        console.warn('⚠️ No bitmap data for stuff:', stuff.id);
+                        continue;
                     }
-                    totalBlank += blank;
-                } else {
-                    // Legacy GB printer printing logic
+
+                    console.log('🖼️ [GB] Bitmap size:', data.width, 'x', data.height);
+                    const bitmap = rgbaToBits(new Uint32Array(data.data.buffer));
+                    const pitch = data.width / 8 | 0;
+                    console.log('📏 [GB] Pitch:', pitch, 'bytes per line');
+
+                    let lineCount = 0;
                     const gbPrinter = printer as CatPrinter;
+
                     for (let i = 0; i < data.height * pitch; i += pitch) {
                         const line = bitmap.slice(i, i + pitch);
                         if (line.every(byte => byte === 0)) {
                             blank += 1;
                         } else {
                             if (blank > 0) {
-                                console.log('⬆️ Feeding', blank, 'blank lines');
+                                console.log('⬆️ [GB] Feeding', blank, 'blank lines');
                                 await gbPrinter.setSpeed(8);
                                 await gbPrinter.feed(blank);
                                 await gbPrinter.setSpeed(speed);
@@ -265,19 +294,19 @@ export default function Preview(props: PrinterProps) {
                             await gbPrinter.draw(line);
                             lineCount++;
                             if (lineCount % 50 === 0) {
-                                console.log('✏️ Drawn', lineCount, 'lines...');
+                                console.log('✏️ [GB] Drawn', lineCount, 'lines...');
                             }
                         }
                     }
                     totalBlank += blank;
+                    console.log('✅ [GB] Stuff', stuff.id, 'completed:', lineCount, 'lines drawn, blank:', blank);
                 }
-                console.log('✅ Stuff', stuff.id, 'completed:', lineCount, 'lines drawn, blank:', blank);
-            }
 
-            console.log('🏁 Finishing print...');
-            console.log('📊 Total blank lines:', totalBlank, 'Extra feed:', finish_feed);
-            await printer.finish(finish_feed);
-            console.log('✅ Print completed!');
+                console.log('🏁 [GB] Finishing print...');
+                console.log('📊 [GB] Total blank lines:', totalBlank, 'Extra feed:', finish_feed);
+                await (printer as CatPrinter).finish(finish_feed);
+                console.log('✅ [GB] Print completed!');
+            }
 
             // Cleanup notifications
             if (!isMXW01) {

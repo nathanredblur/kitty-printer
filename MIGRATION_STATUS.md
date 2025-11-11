@@ -67,79 +67,89 @@ Todos los componentes migrados para usar el nuevo sistema i18n:
 
 ---
 
-## ⚠️ Problema Actual: Impresora MXW01
+## ✅ Protocolo MXW01 - RESUELTO
 
-### Síntomas
-- ✅ Impresora detectada y conectada vía Bluetooth
-- ✅ Comandos enviados sin errores
-- ❌ **La impresora NO responde** (sin notificaciones)
-- ❌ **NO imprime nada**
-- ✅ La app oficial "Fun Print" SÍ funciona correctamente
+### Captura de Tráfico BLE Exitosa
 
-### UUIDs BLE Identificados
+Se capturó el tráfico BLE real de la app "Fun Print" funcionando con la impresora MXW01. Esto reveló el protocolo correcto:
+
+### UUIDs BLE Correctos
 
 ```typescript
 // Servicio principal
 CAT_PRINT_SRV = 0xae30 (0000ae30-0000-1000-8000-00805f9b34fb)
 
-// Características disponibles:
-0xae01: writeWithoutResponse (TX usado actualmente)
-0xae02: notify (RX usado actualmente)
-0xae03: writeWithoutResponse (TX alternativo probado)
-0xae04: notify (RX alternativo probado)
-0xae05: (sin propiedades útiles)
-0xae10: read + write (no probado aún)
+// Características CORRECTAS:
+0xae01 (Handle 0x000A): writeWithoutResponse → Para COMANDOS
+0xae02 (Handle 0x000C): notify → Para NOTIFICACIONES
+0xae03 (Handle 0x000F): writeWithoutResponse → Para DATOS DE IMAGEN
 ```
 
-### Comandos Implementados (No Funcionales)
+### Protocolo Correcto Implementado
+
+**Prefijo:** `0x22 0x21` (NO `0x51 0x78`)
+
+**Formato de comandos:**
+```typescript
+[0x22, 0x21, CMD_LOW, CMD_HIGH, LEN_LOW, LEN_HIGH, ...PAYLOAD]
+// Sin CRC, sin 0xFF al final
+```
+
+**Comandos identificados:**
 
 ```typescript
-// Formato: [0x51, 0x78, COMMAND, 0x00, LEN_LOW, LEN_HIGH, ...PAYLOAD, CRC8, 0xFF]
-
-StartPrint (0x02): [mode, intensity_high, intensity_low]
-  Ejemplo: 0x51 0x78 0x02 0x00 0x03 0x00 0x01 0x61 0xa8 0xda 0xff
+Initialize (0xA7):
+  2221 A700 0000 0000
   
-SendLine1bpp (0xaf): [48 bytes de imagen]
-  Ejemplo: 0x51 0x78 0xaf 0x00 0x30 0x00 [48 bytes...] [CRC] 0xff
+GetVersion (0xB1):
+  2221 B100 0000 0000 00
+  Respuesta: "1.9.3.1.1"
   
-EndPrint (0x05): [0x00]
-FeedPaper (0x0c): [lines_low, lines_high]
+GetStatus (0xA1):
+  2221 A100 0100 0000 FF
+  
+SetConfig (0xA2):
+  2221 A200 0100 5D94 FF
+  intensity = 0x5D = 93 (0-100)
+  
+StartPrint (0xA9):
+  2221 A900 0400 1E00 3000 0000
+  width = 0x1E0 = 480px (para imagen de 384px)
+  height = 0x3000 = 12288px (variable)
+  
+EndPrint (0xAD):
+  2221 AD00 0100 0000 00
 ```
 
-### Log Típico (Sin Respuesta)
+**Datos de imagen:**
+- Se envían directamente a Handle 0x000F (0xae03)
+- SIN encapsular en comandos
+- En chunks de ~185 bytes (MTU)
+- Formato: bitmap 1bpp raw
+
+### Flujo de Impresión Correcto
 
 ```
-✅ Device found: MXW01
-✅ Connected to GATT server
-✅ Characteristics obtained
-🆕 Detected MXW01 printer - using MX protocol
-📤 [MX] Sending 11 bytes: 0x51 0x78 0x02 0x00 0x03 0x00 0x01 0x61 0xa8 0xda 0xff
-📤 [MX] Sending 56 bytes: 0x51 0x78 0xaf 0x00 0x30 0x00 [...]
-✅ Print completed!
-// ❌ NINGUNA notificación de la impresora (ningún 📨)
+1. Conectar a BLE
+2. Obtener características:
+   - cmdTx = 0xae01 (comandos)
+   - dataTx = 0xae03 (datos imagen)
+   - rx = 0xae02 (notificaciones)
+3. Inicializar (0xA7)
+4. Obtener versión (0xB1) [opcional]
+5. Obtener estado (0xA1)
+6. Configurar intensity (0xA2)
+7. Iniciar impresión con dimensiones (0xA9)
+8. Enviar datos de imagen completos a 0xae03
+9. Finalizar impresión (0xAD)
 ```
 
----
+### Implementación
 
-## 🔍 Análisis del Problema
-
-### Hipótesis
-
-1. **Protocolo incorrecto**: Los comandos que enviamos no coinciden con lo que MXW01 espera
-2. **Características BLE incorrectas**: Puede que necesitemos usar 0xae10 u otra característica
-3. **Falta handshake inicial**: Puede haber un comando de inicialización no documentado
-4. **Formato de datos diferente**: Estructura de paquetes puede diferir de la documentación
-
-### Intentos Realizados
-
-- ✅ Implementación basada en [CatPrinterBLE](https://github.com/MaikelChan/CatPrinterBLE)
-- ✅ Probado características 0xae01/0xae02
-- ✅ Probado características 0xae03/0xae04
-- ✅ Diferentes valores de intensity (5000-30000)
-- ✅ Diferentes delays (30ms-200ms)
-- ✅ Envío inmediato vs buffering
-- ✅ Byte order (little-endian y big-endian)
-- ❌ Ninguno funcionó
+- ✅ `src/common/cat-protocol-mx.ts`: Reescrito con protocolo correcto
+- ✅ `src/components/Preview.tsx`: Actualizado para usar 2 características separadas
+- ✅ Flujo simplificado: envía imagen completa, no línea por línea
+- ⏳ Pendiente: Probar con impresora real
 
 ---
 
@@ -321,24 +331,57 @@ git commit -m "MNY-12345: descripción del cambio"
 
 ---
 
-## 🚀 Cuando Continuemos
+## 🚀 Estado Actual
 
-### Checklist Inmediato
+### ✅ Implementación Completada
 
-- [ ] Revisar PROTOCOL.md de jeremy46231/MXW01-catprinter
-- [ ] Comparar comandos del código Python con nuestros comandos
-- [ ] Identificar diferencias específicas
-- [ ] Actualizar `cat-protocol-mx.ts` con formato correcto
-- [ ] Probar impresión
-- [ ] Si funciona, documentar el protocolo correcto
+- [x] Captura de tráfico BLE real de Fun Print
+- [x] Análisis del protocolo MXW01
+- [x] Reescritura de `cat-protocol-mx.ts` con protocolo correcto
+- [x] Actualización de `Preview.tsx` para usar 2 características BLE separadas
+- [x] Build exitoso sin errores ni advertencias
+- [x] Documentación actualizada
 
-### Preguntas a Responder
+### ⏳ Pendiente: Prueba con Hardware Real
 
-1. ¿Qué característica BLE usa el código Python para escribir?
-2. ¿Hay algún comando de handshake/inicialización?
-3. ¿El formato de StartPrint es correcto?
-4. ¿Los comandos 0xaf necesitan algún formato especial?
-5. ¿Se necesita esperar respuestas entre comandos?
+**Ver instrucciones detalladas en:** [`TESTING_INSTRUCTIONS.md`](./TESTING_INSTRUCTIONS.md)
+
+**Comando rápido para probar:**
+```bash
+pnpm dev
+# Abrir http://localhost:4321 en Chrome
+# Conectar impresora MXW01
+# Intentar imprimir
+# Revisar logs en DevTools Console
+```
+
+### Diferencias Clave del Nuevo Protocolo
+
+| Aspecto | Implementación Anterior | Implementación Nueva |
+|---------|------------------------|---------------------|
+| Prefijo | `0x51 0x78` | `0x22 0x21` ✅ |
+| Características BLE | 1 para todo | 2 separadas (cmd/data) ✅ |
+| Envío de imagen | Línea por línea con comandos | Blob completo sin encapsular ✅ |
+| Comandos | 0x02, 0xAF, 0x05 | 0xA7, 0xA9, 0xAD ✅ |
+| CRC / 0xFF | Incluidos | No incluidos ✅ |
+
+### Preguntas Respondidas
+
+1. ✅ **¿Qué característica BLE usa?** 
+   - 0xae01 para comandos
+   - 0xae03 para datos de imagen
+   
+2. ✅ **¿Hay handshake/inicialización?**
+   - Sí: Initialize (0xA7) + GetVersion (0xB1) + GetStatus (0xA1) + SetConfig (0xA2)
+   
+3. ✅ **¿Formato de StartPrint correcto?**
+   - Sí: 0xA9 con dimensiones (width, height) en little-endian
+   
+4. ✅ **¿Comandos de línea necesitan formato especial?**
+   - No se usan comandos por línea. Se envía imagen completa sin encapsular.
+   
+5. ✅ **¿Esperar respuestas?**
+   - Sí, delays de 50-200ms entre comandos críticos
 
 ---
 
